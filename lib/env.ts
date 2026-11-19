@@ -38,6 +38,17 @@ export const wcaScope = () => optional("WCA_OAUTH_SCOPE", "public");
 export const groqApiKey = () => required("GROQ_API_KEY");
 export const groqModel = () => optional("GROQ_MODEL", "openai/gpt-oss-120b");
 
+export function groqReasoningEffort(): "low" | "medium" | "high" {
+  const value = optional("GROQ_REASONING_EFFORT", "low");
+  return value === "medium" || value === "high" ? value : "low";
+}
+
+export function groqMaxTokens(): number {
+  const parsed = Number.parseInt(optional("GROQ_MAX_TOKENS", "1024"), 10);
+  if (!Number.isFinite(parsed)) return 1024;
+  return Math.min(4096, Math.max(256, parsed));
+}
+
 export const sessionSecret = () => required("SESSION_SECRET");
 
 export function pageSize(): number {

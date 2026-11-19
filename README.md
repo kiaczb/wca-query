@@ -51,6 +51,29 @@ Groq's strict structured outputs, so any replacement model must support
 `response_format: { type: "json_schema", strict: true }`. If Hungarian questions
 come back poorly understood, this is the first knob to turn.
 
+#### Keeping Groq usage low
+
+Groq's free tier limits tokens per minute and per day, so the app is built to
+spend as few as possible:
+
+- **SQL cache** (`lib/sql-cache.ts`): the SQL for a question the WCA API has
+  accepted is kept for 24 hours, keyed by the lower-cased question with
+  punctuation removed. Asking the same question again (including the example
+  chips) costs no Groq call. If a cached query starts failing, it is dropped
+  and regenerated.
+- **Low reasoning effort**: for `openai/gpt-oss-*` models the request sends
+  `reasoning_effort` (`GROQ_REASONING_EFFORT`, default `low`) and
+  `include_reasoning: false`. Most of the output tokens of these models are
+  hidden reasoning.
+- **Output cap**: `max_completion_tokens` defaults to 1024
+  (`GROQ_MAX_TOKENS`, 256–4096). Raise it, or the reasoning effort, if long
+  queries come back cut off with an invalid-JSON error.
+- **Compact prompt**: the system prompt in `lib/wca-schema.ts` is about 1.8k
+  tokens. It is sent with every uncached question and again on a correction
+  attempt, so keep additions terse.
+- When Groq answers `429`, the user sees a "quota exhausted, retry in N
+  seconds" message instead of a generic error.
+
 ### WCA OAuth
 
 The WCA Statistics API only executes queries for a signed-in WCA user, so the
@@ -99,6 +122,7 @@ Changing it signs everyone out.
 | `lib/session.ts`              | Encrypted HttpOnly session cookie                            |
 | `lib/wca-api.ts`              | `POST /database/query` client                                |
 | `lib/query-store.ts`          | Server-side handles so paging costs no Groq call             |
+| `lib/sql-cache.ts`            | Question → accepted SQL cache so repeats cost no Groq call   |
 | `lib/rate-limit.ts`           | Per-session and per-address limits                           |
 | `components/*`                | Input, SQL display, results table, pagination, errors        |
 | `components/ui/*`             | Speedcubing Hungary primitives: Button, Card, PageHeader, …  |
@@ -141,6 +165,17 @@ the Hungarian glossary, the result-value conventions (hundredths of a second,
 `-1` for DNF, the `wca_statistics_time_format` helper), the constraints imposed
 by the API's pagination wrapper, and the worked examples. Adding examples there
 is the cheapest way to fix a class of bad queries.
+
+`API_CONSTRAINTS` also steers the model away from query shapes that time out.
+The WCA API enforces a 120-second limit per query and runs every query twice
+(once for the page, once wrapped in `count(*)` for pagination), so a slow query
+costs double. The most common trap is a question like "who first competed in
+2016" being answered by joining `results` to `competitions` and calling
+`YEAR(c.start_date)` — that scans both large tables. `concise_single_results`
+and `concise_average_results` already carry `year`/`month`/`day` per row, so
+the same question can run as a `GROUP BY person_id` over one table with no
+join at all. The prompt now names this pattern explicitly, with a worked
+example.
 
 ### SQL safety
 

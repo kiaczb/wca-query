@@ -6,6 +6,7 @@ import { pageSize } from "@/lib/env";
 import { correctSql, generateSql, GroqError, type SqlDraft } from "@/lib/groq";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
 import { recallQuery, rememberQuery } from "@/lib/query-store";
+import { cachedSql, cacheSql, forgetSql } from "@/lib/sql-cache";
 import { readActiveSession } from "@/lib/session";
 import { validateSql } from "@/lib/sql-validator";
 import { runQuery, WcaApiError } from "@/lib/wca-api";
@@ -108,6 +109,41 @@ export async function POST(request: Request) {
     );
   }
 
+  // Same question asked before: reuse the SQL the WCA API already accepted and
+  // skip Groq entirely.
+  const cached = cachedSql(question);
+  if (cached) {
+    const validation = validateSql(cached.sql);
+    if (validation.ok) {
+      try {
+        const results = await runQuery(
+          validation.sql,
+          requestedPage,
+          size,
+          session.tokens.accessToken,
+        );
+        const id = rememberQuery(
+          session.sid,
+          validation.sql,
+          question,
+          cached.explanation,
+        );
+        return NextResponse.json({
+          queryId: id,
+          query: validation.sql,
+          explanation: cached.explanation,
+          results,
+        });
+      } catch (error) {
+        // A 400 means the stored SQL no longer works; regenerate it below.
+        if (!(error instanceof WcaApiError) || error.status !== 400) {
+          return wcaFailure(error, validation.sql);
+        }
+      }
+    }
+    forgetSql(question);
+  }
+
   let draft: SqlDraft;
   try {
     draft = await generateSql(question);
@@ -157,6 +193,7 @@ export async function POST(request: Request) {
         question,
         draft.explanation,
       );
+      cacheSql(question, validation.sql, draft.explanation);
       return NextResponse.json({
         queryId: id,
         query: validation.sql,
@@ -193,7 +230,12 @@ export async function POST(request: Request) {
 function groqFailure(error: unknown) {
   if (error instanceof GroqError) {
     console.error("Groq request failed:", error.message);
-    return fail("groq", error.message, 502);
+    if (error.status === 429) {
+      return fail("rate_limit", error.message, 429, {
+        retryAfter: error.retryAfter,
+      });
+    }
+    return fail("groq", error.message, error.status);
   }
   console.error("Unexpected error while generating SQL:", error);
   return fail("groq", "Nem sikerült lekérdezést készíteni.", 500);

@@ -2,7 +2,7 @@
 
 import "server-only";
 
-import { groqApiKey, groqModel } from "./env";
+import { groqApiKey, groqMaxTokens, groqModel, groqReasoningEffort } from "./env";
 import { buildSystemPrompt } from "./wca-schema";
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
@@ -14,7 +14,23 @@ export type SqlDraft = {
   error: string;
 };
 
-export class GroqError extends Error {}
+export class GroqError extends Error {
+  constructor(
+    message: string,
+    readonly status = 502,
+    readonly retryAfter = 0,
+  ) {
+    super(message);
+  }
+}
+
+// gpt-oss models spend most of their output on hidden reasoning. "low" cuts
+// that by a large factor and is plenty for a single SQL statement. Other model
+// families reject or ignore these fields, so only send them where they apply.
+function reasoningOptions(model: string): Record<string, unknown> {
+  if (!model.startsWith("openai/gpt-oss")) return {};
+  return { reasoning_effort: groqReasoningEffort(), include_reasoning: false };
+}
 
 const RESPONSE_FORMAT = {
   type: "json_schema",
@@ -66,8 +82,9 @@ async function complete(messages: ChatMessage[]): Promise<SqlDraft> {
         model: groqModel(),
         messages,
         temperature: 0.1,
-        max_completion_tokens: 2048,
+        max_completion_tokens: groqMaxTokens(),
         response_format: RESPONSE_FORMAT,
+        ...reasoningOptions(groqModel()),
       }),
       cache: "no-store",
       signal: AbortSignal.timeout(60_000),
@@ -83,6 +100,17 @@ async function complete(messages: ChatMessage[]): Promise<SqlDraft> {
     const detail = (await response.json().catch(() => null)) as {
       error?: { message?: string };
     } | null;
+
+    if (response.status === 429) {
+      const header = Number.parseFloat(response.headers.get("retry-after") ?? "");
+      const retryAfter =
+        Number.isFinite(header) && header > 0 ? Math.ceil(header) : 60;
+      throw new GroqError(
+        `Elfogyott a Groq keret. Próbáld újra kb. ${retryAfter} másodperc múlva.`,
+        429,
+        retryAfter,
+      );
+    }
 
     throw new GroqError(
       detail?.error?.message ?? `A Groq HTTP ${response.status} hibát adott.`,
