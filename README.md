@@ -9,6 +9,8 @@ rows come back as a paginated table.
 The interface is in Hungarian and uses the Speedcubing Hungary design system, so
 the two sites read as one family.
 
+![WCA Statistics AI: a question asked in Hungarian and the SQL generated for it](docs/screenshot.png)
+
 ```
 browser → /api/query → Groq → SQL validation → WCA OAuth token → WCA Statistics API → table
 ```
